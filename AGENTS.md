@@ -86,6 +86,16 @@ plans/CURRENT_PHASE.md
 plans/CURRENT_TASK.md
 ```
 
+Also read:
+
+```text
+OWNER_PROFILE.md
+```
+
+This file contains stable, non-sensitive context about the project owner, creator identity, public accounts, working preferences, and communication style.
+
+`OWNER_PROFILE.md` provides context only. It does not override project architecture, security rules, permissions, `plans/CURRENT_PHASE.md`, or `plans/CURRENT_TASK.md`.
+
 Then read whichever architecture documents are relevant to the task.
 
 Examples:
