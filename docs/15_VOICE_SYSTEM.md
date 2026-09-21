@@ -1,1937 +1,2773 @@
 # M I K A S A
-## Voice System Architecture Specification
+## Real-Time Voice Runtime Architecture
 
 **File:** `docs/15_VOICE_SYSTEM.md`
 
-**Version:** 0.1.0
+**Version:** 0.2.0
 
-**Status:** PROPOSED — Pending architecture research and approval
+**Status:** PROPOSED — redesigned for local-first, real-time conversational voice
 
-**Authority:** Voice input, speech recognition, text-to-speech, activation, interruption, live conversation, voice task control, and voice-specific UX
+**Authority:** Audio input/output, streaming speech recognition, conversational turn-taking, interruption, expressive speech generation, local TTS routing, voice identity, and voice-specific interaction behavior
 
-**Applies to:** Voice interface, Main Agent, Agent Runtime, Application Gateway, Task Manager, Permission Service, Model Router, UI, and future desktop/mobile clients.
+**Applies to:** Application Gateway, Main Agent, Task Manager, Model Router, Permission Service, desktop/mobile interfaces, local inference providers, and future multimodal systems.
 
 ---
 
 # 1. Purpose
 
-This document defines the architecture and operational behavior of Mikasa's Voice System.
+Mikasa's Voice System must not behave like a traditional:
 
-The Voice System should allow users to interact naturally with Mikasa through speech while preserving the same task, permission, memory, and execution architecture used by text interfaces.
+```text
+record
+→ transcribe
+→ wait
+→ generate
+→ synthesize entire WAV
+→ play
+```
 
-The Voice System may eventually support:
+voice assistant.
 
-- Speech input.
-- Speech-to-text.
-- Spoken responses.
-- Text-to-speech.
-- Push-to-talk.
-- Wake-word activation.
-- Voice interruption.
-- Live conversational turn-taking.
-- Spoken task progress.
-- Voice task cancellation.
-- Voice approval flows where appropriate.
-- Multiple audio backends.
-- Local and cloud speech providers.
+The target is a real-time conversational system where Mikasa can:
 
-The initial voice milestone should remain deliberately small.
+- Hear the user naturally.
+- Detect when the user starts and stops speaking.
+- Transcribe speech continuously.
+- Understand partial and completed turns.
+- Begin preparing responses with low latency.
+- Speak before an entire response has been synthesized.
+- Stream audio progressively.
+- Continue listening while speaking.
+- Be interrupted immediately.
+- Distinguish interruption of speech from cancellation of a task.
+- Change speaking style based on conversational state.
+- Preserve one consistent Mikasa voice across different TTS engines.
+- Operate locally wherever practical.
+- Adapt to available hardware.
+- Fall back gracefully when advanced voice capabilities are unavailable.
+
+Voice remains an interface to the same Mikasa core.
+
+It is not a second assistant.
 
 ---
 
 # 2. Core Voice Principle
 
-Voice must remain an interface.
+The architecture must preserve:
 
-```text id="wdpjfq"
+```text
 VOICE INPUT
-    |
-    v
-SPEECH RECOGNITION
-    |
-    v
+    !=
+SEPARATE AGENT
+```
+
+Both text and voice reach:
+
+```text
 APPLICATION GATEWAY
-    |
-    v
-M I K A S A CORE
-    |
-    v
-RESPONSE / TASK STATE
-    |
-    v
-VOICE RESPONSE
+
+↓
+
+MAIN AGENT
+
+↓
+
+TASK MANAGER
+
+↓
+
+AGENT RUNTIME
+
+↓
+
+TOOLS / MEMORY / MODELS
 ```
 
-The Voice System must not create:
+Voice adds:
 
-- A separate memory system.
-- A separate agent runtime.
-- A separate permission model.
-- A separate task manager.
-- A separate personality engine.
+```text
+REAL-TIME AUDIO INTERACTION
+```
 
-Text and voice should reach the same underlying Mikasa.
+around the existing core.
 
 ---
 
-# 3. Voice Architecture Overview
+# 3. Target Experience
 
-```text id="wt0bpg"
-                   USER
-                     |
-                     v
-               AUDIO INPUT
-                     |
-                     v
-             VOICE CONTROLLER
-                     |
-          +----------+----------+
-          |                     |
-          v                     v
-   ACTIVATION SYSTEM      AUDIO PROCESSING
-                                |
-                                v
-                      SPEECH-TO-TEXT PROVIDER
-                                |
-                                v
-                         TRANSCRIPT
-                                |
-                                v
-                      APPLICATION GATEWAY
-                                |
-                                v
-                         MIKASA CORE
-                                |
-                                v
-                           RESPONSE
-                                |
-                                v
-                       SPEECH PLANNER
-                                |
-                                v
-                     TEXT-TO-SPEECH PROVIDER
-                                |
-                                v
-                         AUDIO OUTPUT
+The intended user experience is closer to a natural human conversation.
+
+Example:
+
+```text
+MIKASA:
+"I checked the runtime and I think the issue is—"
+
+USER:
+"Wait. Did you check the config first?"
+
+MIKASA:
+[stops speaking immediately]
+
+"Yeah. Let me check that before I continue."
 ```
 
-These are logical responsibilities.
+The previous task may continue running.
 
-They do not require separate processes.
+Stopping Mikasa's speech must not automatically cancel the task.
 
 ---
 
-# 4. Voice Controller
+# 4. Voice Design Goals
 
-The Voice Controller coordinates voice interaction.
+The system should optimize for:
 
-Suggested component:
+```text
+LOW LATENCY
 
-`VoiceController`
+NATURAL TURN-TAKING
+
+INTERRUPTIBILITY
+
+LOCAL EXECUTION
+
+EXPRESSIVE HUMAN SPEECH
+
+CONSISTENT VOICE IDENTITY
+
+PRIVACY
+
+MODULAR PROVIDERS
+
+GRACEFUL DEGRADATION
+
+RESOURCE AWARENESS
+```
+
+No single provider should be required to implement every capability.
+
+---
+
+# 5. Non-Goals
+
+The first implementation does not require:
+
+```text
+perfect human indistinguishability
+
+always-on wake word
+
+speaker identity authentication
+
+full emotional simulation
+
+3D avatar lip synchronization
+
+perfect full-duplex conversation
+
+support for every language
+
+automatic cloud fallback
+```
+
+The architecture must allow these later without depending on them now.
+
+---
+
+# 6. High-Level Architecture
+
+```text
+                         M I K A S A
+
+                            CORE
+                             ▲
+                             │
+                    APPLICATION GATEWAY
+                             ▲
+                             │
+                      TURN MANAGER
+                    ┌────────┴────────┐
+                    │                 │
+              USER SPEECH        MIKASA SPEECH
+                    │                 │
+                    │                 ▼
+                    │          SPEECH DIRECTOR
+                    │                 │
+                    │                 ▼
+                    │           LOCAL TTS ROUTER
+                    │                 │
+                    │                 ▼
+                    │        STREAMING AUDIO PLAYER
+                    │                 │
+                    │                 ▼
+                    │              SPEAKER
+                    │
+                    ▼
+              AUDIO FRONT-END
+                    │
+          ┌─────────┼──────────┐
+          │         │          │
+          ▼         ▼          ▼
+         VAD       AEC      DENOISING
+          │
+          ▼
+      STREAMING STT
+          │
+          ▼
+    PARTIAL / FINAL TEXT
+```
+
+A separate interruption path operates continuously:
+
+```text
+MICROPHONE
+   │
+   ▼
+VAD
+   │
+   ├── HUMAN SPEECH DETECTED
+   │
+   ▼
+BARGE-IN CONTROLLER
+   │
+   ├── duck current TTS
+   ├── confirm speech
+   ├── cancel synthesis
+   ├── flush queued audio
+   └── return control to user turn
+```
+
+---
+
+# 7. Major Components
+
+The Voice Runtime consists of these logical systems:
+
+```text
+AudioFrontEnd
+
+VoiceActivityDetector
+
+EchoCancellationLayer
+
+StreamingSpeechRecognizer
+
+TurnManager
+
+BargeInController
+
+SpeechDirector
+
+LocalTTSRouter
+
+VoiceIdentityManager
+
+StreamingAudioPlayer
+
+VoiceSessionManager
+```
+
+These do not necessarily need separate processes.
+
+They represent clear responsibilities.
+
+---
+
+# 8. Audio Front-End
+
+`AudioFrontEnd` owns raw microphone processing.
 
 Responsibilities:
 
-- Start and stop listening.
-- Manage activation state.
-- Capture audio.
-- Submit audio for transcription.
-- Receive transcripts.
-- Send transcripts to the Application Gateway.
-- Receive Mikasa responses.
-- Decide what should be spoken.
-- Coordinate speech output.
-- Handle interruptions.
-- Handle cancellation.
-- Maintain voice-session state.
+- Capture microphone audio.
+- Normalize sample format.
+- Resample when necessary.
+- Apply noise suppression.
+- Feed VAD.
+- Feed acoustic echo cancellation.
+- Feed STT.
+- Maintain timing information.
+- Expose microphone state.
 
-The Voice Controller must not implement agent reasoning.
+Conceptually:
 
----
-
-# 5. Voice Interaction Modes
-
-Mikasa should eventually support several modes.
-
-## Push-to-Talk
-
-The user explicitly starts voice input.
-
-Example:
-
-```text id="j4clmj"
-PRESS
-  |
-  v
-SPEAK
-  |
-  v
-RELEASE
-  |
-  v
-PROCESS
+```text
+Microphone
+   ↓
+Audio Capture
+   ↓
+Resample
+   ↓
+Noise Suppression
+   ↓
+Echo Cancellation
+   ↓
+VAD
+   ↓
+STT
 ```
 
-This is the simplest and safest initial mode.
-
 ---
 
-## Tap-to-Toggle
+# 9. Audio Format
 
-The user taps once to begin listening and again to stop.
+The internal audio format should be normalized.
 
-Useful for longer voice input.
+A likely representation may use:
 
----
+```text
+PCM
 
-## Wake-Word Mode
+mono
 
-Future versions may continuously listen for a local activation phrase.
+16-bit or float PCM
 
-Example:
-
-```text id="g56npt"
-"Hey Mikasa"
+fixed internal sample rate
 ```
 
-Wake-word mode must be optional.
+The final format is an ADR.
 
-It has additional privacy, resource, and false-activation concerns.
+Providers may internally require different formats.
 
----
-
-## Live Conversation Mode
-
-Future versions may support continuous conversational turn-taking.
-
-This requires:
-
-- Voice activity detection.
-- Fast transcription.
-- Streaming response.
-- Interruption handling.
-- Audio queue management.
-- Low latency.
-
-Live mode is not required for the first voice implementation.
-
----
-
-# 6. Initial Voice Milestone
-
-The first voice milestone should support:
-
-```text id="u0uhzf"
-PUSH-TO-TALK
-
-SPEECH-TO-TEXT
-
-TEXT REQUEST SUBMISSION
-
-TEXT RESPONSE
-
-TEXT-TO-SPEECH
-
-STOP SPEAKING
-```
-
-Wake-word activation and full duplex conversation should remain future features.
-
-This gives Mikasa useful voice interaction without prematurely building a complex real-time audio system.
-
----
-
-# 7. Audio Input
-
-The Voice System must capture audio from an authorized input device.
-
-Potential metadata:
-
-```text id="4vq0hx"
-AudioInput:
-    input_id
-
-    device_id
-
-    sample_rate
-    channels
-    format
-
-    started_at
-    completed_at
-```
-
-Exact representation depends on the selected audio framework.
-
-The interface should clearly indicate when the microphone is active.
-
----
-
-# 8. Microphone Permissions
-
-Microphone access must use explicit operating-system and application permissions.
-
-Mikasa must not attempt to bypass system privacy controls.
-
-The user should be able to disable microphone access entirely.
-
-When access is unavailable, the UI should explain that voice input cannot start.
-
----
-
-# 9. Listening State
-
-The interface must clearly distinguish:
-
-```text id="jfdqx2"
-IDLE
-
-LISTENING
-
-PROCESSING
-
-SPEAKING
-
-INTERRUPTED
-
-ERROR
-```
-
-A microphone indicator should reflect actual capture state.
-
-Do not display:
-
-```text id="0dl2ep"
-Listening...
-```
-
-when audio capture is inactive.
+Adapters should convert at the provider boundary.
 
 ---
 
 # 10. Voice Activity Detection
 
-Future continuous modes may use Voice Activity Detection (VAD).
+VAD detects probable human speech.
 
-VAD can help determine:
-
-- When speech starts.
-- When speech ends.
-- Whether silence should end a turn.
-
-VAD must not be confused with speech recognition.
-
-Its job is detecting likely speech activity.
-
-The first push-to-talk version does not require sophisticated VAD.
-
----
-
-# 11. Speech-to-Text
-
-Speech-to-text converts captured audio into text.
-
-Suggested abstraction:
-
-```text id="acyey2"
-SpeechToTextProvider:
-    transcribe(audio, options)
-        -> TranscriptionResult
-```
-
-Future optional operation:
-
-```text id="dqhb9f"
-stream_transcription(audio_stream)
-```
-
-The Voice Controller should depend on this interface rather than a specific speech provider.
-
----
-
-# 12. Transcription Result
-
-Conceptual structure:
-
-```text id="qlroge"
-TranscriptionResult:
-    transcript_id
-
-    text
-
-    language
-
-    confidence_metadata
-
-    started_at
-    completed_at
-
-    provider_id
-```
-
-Confidence values must be treated carefully.
-
-Provider confidence is not always comparable between systems.
-
----
-
-# 13. Transcript Validation
-
-The transcript becomes user input.
-
-Before acting on it, Mikasa should account for transcription uncertainty.
-
-Example:
-
-Spoken:
-
-```text id="3gcoph"
-Delete the test file.
-```
-
-Potential incorrect transcription:
-
-```text id="1bq35g"
-Delete the text file.
-```
-
-For high-impact actions, the permission and approval system should protect against serious consequences even if speech recognition is imperfect.
-
-Voice transcription must not bypass normal approval requirements.
-
----
-
-# 14. Transcript Display
-
-Where a screen is available, the recognized text should be visible.
-
-Example:
-
-```text id="ortvm7"
-You said:
-
-"Run the tests for this project."
-```
-
-This helps users catch transcription errors.
-
-The user may be allowed to edit the transcript before submission in certain modes.
-
----
-
-# 15. Language Support
-
-The Voice System should eventually support configurable recognition languages.
-
-Possible behavior:
-
-```text id="fk57ci"
-AUTO DETECT
-
-SELECTED LANGUAGE
-```
-
-Language support depends on the chosen speech provider.
-
-The system must not claim support for languages that the configured provider cannot recognize reliably.
-
----
-
-# 16. Mixed-Language Speech
-
-Future versions may encounter users mixing languages in one utterance.
-
-The architecture should allow providers that support multilingual transcription.
-
-No complex multilingual routing is required for the first milestone.
-
----
-
-# 17. Transcript Submission
-
-Once a transcript is accepted, it should be submitted through the normal application gateway.
-
-```text id="uc1um0"
-TRANSCRIPT
-    |
-    v
-UserRequest
-    |
-    v
-APPLICATION GATEWAY
-    |
-    v
-MAIN AGENT / TASK SYSTEM
-```
-
-Voice-originated requests should have metadata such as:
-
-```text id="hlpd22"
-input_mode: voice
-```
-
-The core request semantics remain the same.
-
----
-
-# 18. Voice and Tasks
-
-A spoken command may create an ordinary Mikasa task.
-
-Example:
-
-```text id="r2dtsa"
-User:
-"Mikasa, inspect my project and fix the failing tests."
-```
-
-The backend may create:
-
-```text id="99plse"
-Task:
-Fix failing tests.
-```
-
-The task must remain visible in normal task views.
-
-Voice tasks are not a separate task type.
-
----
-
-# 19. Spoken Responses
-
-Not every assistant response needs to be read aloud in full.
-
-The Voice System should distinguish:
-
-```text id="8435d1"
-DISPLAY RESPONSE
-
-SPOKEN RESPONSE
-```
-
-For example, a detailed coding report may be displayed while Mikasa says:
-
-```text id="ht9msz"
-"I fixed the failing test and verified it. I changed one file. The details are on screen."
-```
-
-This avoids long, exhausting spoken output.
-
----
-
-# 20. Speech Planner
-
-A future `SpeechPlanner` may decide how much information should be spoken.
+It does not perform transcription.
 
 Responsibilities:
 
-- Create concise spoken summaries.
-- Preserve critical warnings.
-- Preserve approval details.
-- Avoid reading large tables or code blocks aloud.
-- Refer users to the visual interface for detailed output.
+```text
+speech_started
 
-The Speech Planner must not change the actual task result.
+speech_continues
 
-It only adapts presentation for audio.
+speech_ended
+
+silence
+
+possible_interruption
+```
+
+VAD is critical for:
+
+- End-of-turn detection.
+- Barge-in.
+- Hands-free sessions.
+- Avoiding unnecessary STT work.
 
 ---
 
-# 21. Text-to-Speech
+# 11. Acoustic Echo Cancellation
 
-TTS should use a provider abstraction.
+Mikasa must eventually be able to listen while she speaks.
+
+Without acoustic echo cancellation:
+
+```text
+MIKASA SPEAKS
+      ↓
+SPEAKER
+      ↓
+MICROPHONE HEARS MIKASA
+      ↓
+STT THINKS MIKASA IS USER
+```
+
+This is unacceptable.
+
+The audio player should expose a reference stream:
+
+```text
+TTS OUTPUT
+   │
+   ├────→ SPEAKER
+   │
+   └────→ AEC REFERENCE
+```
+
+AEC uses this signal to suppress Mikasa's own speech from microphone input.
+
+---
+
+# 12. Self-Speech Suppression
+
+Echo cancellation may not be perfect.
+
+The system should also use:
+
+- Known playback timing.
+- Outgoing speech transcript.
+- Audio correlation where useful.
+- VAD confidence.
+- Microphone/speaker state.
+
+This provides layered protection against Mikasa responding to herself.
+
+---
+
+# 13. Speech Recognition Architecture
+
+Speech recognition should be streaming-first.
 
 Conceptual interface:
 
-```text id="pm0c9l"
-TextToSpeechProvider:
-    synthesize(text, voice_config)
-        -> AudioResult
+```text
+StreamingSTTProvider:
+    start_session()
+
+    push_audio(chunk)
+
+    receive_partial()
+
+    receive_final()
+
+    cancel()
+
+    close()
 ```
 
-Future operation:
-
-```text id="46dxde"
-stream_speech(text_stream)
-```
-
-The Voice Controller should not depend permanently on one TTS provider.
+Traditional one-shot transcription may remain as a fallback.
 
 ---
 
-# 22. TTS Configuration
+# 14. Partial Transcripts
 
-Possible configuration:
+Streaming STT may produce:
 
-```text id="ju6ksm"
-VoiceConfig:
-    voice_id
-    language
+```text
+"can you che—"
 
-    rate
-    pitch
+"can you check the—"
 
-    volume
+"can you check the config"
 
-    provider_options
+"can you check the config first?"
 ```
 
-Not all providers support all parameters.
+These are:
 
-Unsupported settings must not be silently represented as active.
-
----
-
-# 23. Voice Identity
-
-Mikasa may eventually have a recognizable default voice.
-
-The voice should be treated as presentation configuration, not system identity.
-
-Changing the voice must not change:
-
-- Memory.
-- Agent behavior.
-- Permissions.
-- Task history.
-- Personality rules.
-
----
-
-# 24. Voice Selection
-
-The user should eventually be able to select from configured voices.
-
-Possible settings:
-
-```text id="ph3jbe"
-Default voice
-
-Speech speed
-
-Auto-speak responses
-
-Voice language
+```text
+PARTIAL
 ```
 
-Provider-specific identifiers should remain behind the voice configuration layer.
+until finalized.
+
+Partial transcripts are useful for:
+
+- UI feedback.
+- Turn prediction.
+- Latency reduction.
+
+They are not automatically executable commands.
 
 ---
 
-# 25. Speech Output Queue
+# 15. Final Transcripts
 
-Mikasa may generate new responses while previous speech is still playing.
+A final transcript represents a completed user turn.
 
-The Voice Controller should maintain an output queue.
+Only finalized text should normally become a canonical `UserRequest`.
 
-Potential operations:
+Exception:
 
-```text id="mvzlri"
+Future advanced conversational modes may begin speculative processing from partial text.
+
+Speculative work must not create irreversible actions before finalization.
+
+---
+
+# 16. Endpointing
+
+The system must determine when the user has finished speaking.
+
+Signals may include:
+
+- VAD silence.
+- STT endpoint prediction.
+- Punctuation/prosody.
+- Maximum silence timer.
+- Explicit push-to-talk release.
+
+Good endpointing is essential.
+
+Too early:
+
+```text
+user gets cut off
+```
+
+Too late:
+
+```text
+conversation feels sluggish
+```
+
+Endpoint behavior should eventually adapt to speaking style.
+
+---
+
+# 17. Turn Manager
+
+`TurnManager` is the central coordinator of conversational timing.
+
+It does not perform language reasoning.
+
+It coordinates:
+
+```text
+WHO CURRENTLY HAS THE FLOOR?
+```
+
+Possible states:
+
+```text
+IDLE
+
+USER_STARTING
+
+USER_SPEAKING
+
+USER_ENDING
+
+TRANSCRIBING
+
+MIKASA_PROCESSING
+
+MIKASA_STARTING
+
+MIKASA_SPEAKING
+
+INTERRUPTING
+
+RECOVERING
+
+MUTED
+
+ERROR
+```
+
+These states belong to voice interaction.
+
+They must not replace task states.
+
+---
+
+# 18. Turn Ownership
+
+At any moment, the system should know:
+
+```text
+USER OWNS TURN
+
+MIKASA OWNS TURN
+
+TURN TRANSITION
+
+NO ACTIVE TURN
+```
+
+This allows correct behavior during interruption.
+
+---
+
+# 19. Full Duplex Target
+
+The eventual architecture should support:
+
+```text
+MICROPHONE ACTIVE
++
+MIKASA AUDIO PLAYING
+```
+
+simultaneously.
+
+This is full-duplex interaction.
+
+However, the system may initially operate in:
+
+```text
+SMART HALF-DUPLEX
+```
+
+while retaining the same architecture.
+
+---
+
+# 20. Smart Half-Duplex
+
+Initial implementation may use:
+
+```text
+USER SPEAKS
+
+↓
+
+MIKASA PROCESSES
+
+↓
+
+MIKASA SPEAKS
+
+↓
+
+USER INTERRUPTS IF NEEDED
+```
+
+The microphone remains available for barge-in detection.
+
+This gives much of the natural experience without requiring perfect full-duplex audio immediately.
+
+---
+
+# 21. Barge-In
+
+Barge-in means the user talks while Mikasa is speaking.
+
+The system should react rapidly.
+
+Expected flow:
+
+```text
+USER STARTS SPEAKING
+      |
+      v
+VAD TRIGGER
+      |
+      v
+DUCK AUDIO
+      |
+      v
+CONFIRM HUMAN SPEECH
+      |
+      v
+STOP CURRENT PLAYBACK
+      |
+      v
+CANCEL TTS GENERATION
+      |
+      v
+CLEAR STALE SPEECH QUEUE
+      |
+      v
+LISTEN TO USER
+```
+
+---
+
+# 22. Audio Ducking
+
+The player should reduce Mikasa's volume immediately when potential user speech begins.
+
+This gives the user conversational control before final interruption confirmation.
+
+Example:
+
+```text
+100% volume
+
+↓
+
+potential interruption
+
+↓
+
+15–30% volume
+
+↓
+
+confirmed human speech
+
+↓
+
+0%
+```
+
+Exact values require UX testing.
+
+---
+
+# 23. False Barge-In Protection
+
+Random noise should not constantly interrupt Mikasa.
+
+Potential confirmation signals:
+
+```text
+VAD confidence
+
+speech duration
+
+AEC-cleaned signal
+
+STT activity
+
+minimum speech window
+```
+
+The goal is fast but not overly sensitive interruption.
+
+---
+
+# 24. Interruption Semantics
+
+The system must distinguish at least:
+
+```text
+STOP_SPEAKING
+
+INTERRUPT_RESPONSE
+
+CANCEL_TASK
+```
+
+Example:
+
+```text
+"stop talking"
+```
+
+means:
+
+```text
+STOP_SPEAKING
+```
+
+not:
+
+```text
+CANCEL_TASK
+```
+
+Example:
+
+```text
+"cancel the build task"
+```
+
+means a real task cancellation request.
+
+---
+
+# 25. Cancellation Tokens
+
+Streaming generation systems should support cancellation.
+
+Potential chain:
+
+```text
+BargeInController
+      |
+      ├── cancel AudioPlayer
+      ├── cancel TTS generation
+      └── optionally cancel response generation
+```
+
+Whether the LLM generation is cancelled depends on interaction policy.
+
+The underlying long-running task normally remains active.
+
+---
+
+# 26. Speech Queue
+
+The `StreamingAudioPlayer` maintains a speech queue.
+
+Possible operations:
+
+```text
 enqueue
 
 play
 
+duck
+
 pause
 
-cancel
+resume
 
-clear
+flush
+
+cancel_current
 ```
 
-Important new information may supersede stale speech.
+Old progress messages must be discardable.
 
 Example:
 
-A task fails while Mikasa is still reading an old progress update.
+If task state changes from:
 
-The old speech should be interruptible.
+```text
+RUNNING
+```
+
+to:
+
+```text
+FAILED
+```
+
+before an old progress message plays, the old progress message may be dropped.
 
 ---
 
-# 26. Barge-In / Interruption
+# 27. Streaming TTS
 
-The user should eventually be able to interrupt Mikasa while she is speaking.
+TTS should produce audio incrementally.
+
+Preferred:
+
+```text
+TEXT SEGMENT
+   ↓
+TTS
+   ↓
+AUDIO CHUNK 1 → PLAY
+AUDIO CHUNK 2 → PLAY
+AUDIO CHUNK 3 → PLAY
+...
+```
+
+Avoid waiting for a complete response WAV.
+
+This improves:
+
+- First-audio latency.
+- Interruptibility.
+- Memory usage.
+- Conversational feel.
+
+---
+
+# 28. Local TTS Router
+
+Mikasa must not hard-code a single TTS engine.
+
+Suggested component:
+
+```text
+LocalTTSRouter
+```
+
+Responsibilities:
+
+- Register local TTS engines.
+- Query capabilities.
+- Check hardware requirements.
+- Select appropriate engine.
+- Create streaming synthesis session.
+- Normalize output.
+- Apply fallback policy.
+
+---
+
+# 29. TTS Provider Contract
+
+Conceptual contract:
+
+```text
+TTSProvider:
+    provider_id
+
+    get_capabilities()
+
+    check_availability()
+
+    load_voice(identity)
+
+    start_stream(request)
+
+    cancel(stream_id)
+
+    unload()
+```
+
+Streaming API may yield:
+
+```text
+AudioChunk
+```
+
+objects.
+
+---
+
+# 30. TTS Capability Metadata
+
+Providers should advertise capabilities.
+
+Examples:
+
+```text
+STREAMING
+
+VOICE_CLONING
+
+VOICE_DESIGN
+
+EMOTION_CONTROL
+
+STYLE_CONTROL
+
+SPEED_CONTROL
+
+PITCH_CONTROL
+
+VOCAL_EVENTS
+
+MULTILINGUAL
+
+CPU_SUPPORTED
+
+GPU_SUPPORTED
+
+LOW_LATENCY
+
+OFFLINE
+```
+
+Routing depends on real supported features.
+
+---
+
+# 31. Candidate TTS Providers
+
+Current research candidates include:
+
+```text
+Pocket TTS
+
+Breeze TTS 2
+
+Whisper-Chan adapter
+
+future local engines
+```
+
+These are candidates.
+
+They are not yet architecture commitments.
+
+---
+
+# 32. Pocket TTS Role
+
+Pocket TTS is a strong candidate for:
+
+```text
+REALTIME_LOCAL
+LOW_RESOURCE
+CPU_FIRST
+```
+
+profiles.
+
+Reasons to investigate further:
+
+- Small model.
+- Streaming.
+- Local execution.
+- Voice cloning.
+- Low first-audio latency.
+- CPU-oriented design.
+
+It should be evaluated on the actual target machines.
+
+---
+
+# 33. Breeze TTS 2 Role
+
+Breeze TTS 2 is a candidate for:
+
+```text
+EXPRESSIVE_HIGH_QUALITY
+```
+
+profiles.
+
+Interesting capabilities include:
+
+- Voice design.
+- Voice cloning.
+- Delivery direction.
+- Emotional control.
+- Vocal events.
+- Streaming.
+
+Its larger hardware requirements make it unsuitable as the only voice backend.
+
+Licensing must also be evaluated before production use.
+
+---
+
+# 34. Whisper-Chan Role
+
+`Jinny-406/whisper-chan` should be researched as a separate candidate or source of reusable voice-runtime ideas.
+
+Do not assume its capabilities until the repository is inspected.
+
+Possible outcomes:
+
+```text
+TTS provider
+
+STT provider
+
+full voice runtime
+
+audio utility layer
+
+research-only reference
+```
+
+---
+
+# 35. TTS Profiles
+
+The router should eventually support profiles.
 
 Example:
 
-```text id="5unw3p"
-MIKASA:
-"I've inspected the project and—"
+```text
+REALTIME
 
-USER:
-"Stop."
+EXPRESSIVE
+
+LOW_RESOURCE
+
+OFFLINE
+
+BATTERY_SAVER
+
+HIGH_QUALITY
 ```
 
-Expected:
+Profiles represent intent.
 
-- Stop TTS quickly.
-- Do not automatically cancel the underlying task unless the user's intent is task cancellation.
-- Return to listening or idle state.
+They do not directly name providers.
 
 ---
 
-# 27. Speech Interruption vs. Task Cancellation
-
-These are different.
-
-```text id="osoywi"
-"Stop talking."
-```
-
-means:
-
-```text id="0s77tn"
-STOP AUDIO OUTPUT
-```
-
-while:
-
-```text id="cpcb6g"
-"Stop the task."
-```
-
-means:
-
-```text id="qdgj37"
-REQUEST TASK CANCELLATION
-```
-
-Intent must be interpreted carefully.
-
-When ambiguity affects a high-impact running task, the system may need confirmation.
-
----
-
-# 28. Voice Task Cancellation
-
-The user should be able to say:
-
-```text id="7dwyyu"
-Cancel the current task.
-```
-
-The Voice System sends a normal cancellation request to the Task Manager.
-
-The cancellation must use the same backend logic as clicking the cancel button.
-
-The Voice Controller must not locally pretend a task was cancelled.
-
----
-
-# 29. Voice Pause / Resume
-
-When pause/resume exists, voice commands may include:
-
-```text id="647744"
-Pause this task.
-
-Resume the project task.
-```
-
-These commands should call the real task APIs.
-
-They must not simulate pause by merely muting output.
-
----
-
-# 30. Voice Approvals
-
-Sensitive actions require special care in voice.
-
-Example:
-
-```text id="cvy5pa"
-Mikasa:
-"I need permission to modify files outside the current project. Do you want to allow that once?"
-```
-
-The user may say:
-
-```text id="981ox0"
-Yes.
-```
-
-The approval must be associated with the exact pending action.
-
-A generic "yes" must not authorize unrelated requests.
-
----
-
-# 31. Approval Context
-
-The Voice Controller must know which approval request is active.
-
-Conceptual structure:
-
-```text id="tlm6zw"
-VoiceApprovalContext:
-    approval_id
-
-    task_id
-
-    requested_action
-
-    requested_scope
-
-    expires_at
-```
-
-Only the active valid approval should accept a spoken decision.
-
----
-
-# 32. Ambiguous Approval Responses
-
-Responses such as:
-
-```text id="hqhfvg"
-Maybe.
-
-Okay, whatever.
-
-Sure, but only for that file.
-```
-
-must be interpreted according to the actual requested scope.
-
-If the response changes the scope, the Permission Service must receive the correct restricted approval.
-
-A vague or uncertain transcription must not silently become broad authorization.
-
----
-
-# 33. Dangerous Misrecognition
-
-High-impact actions should not depend on one uncertain transcription.
-
-For example:
-
-```text id="ur27pg"
-Delete the repository.
-```
-
-If the transcription or intent is uncertain, the system should require a stronger confirmation path according to security policy.
-
-Voice does not lower security requirements.
-
----
-
-# 34. Wake-Word Architecture
-
-Future wake-word support should be local where practical.
+# 36. Example Provider Routing
 
 Conceptually:
 
-```text id="23te37"
-MICROPHONE
-   |
-   v
-LOCAL WAKE-WORD DETECTOR
-   |
-   v
-ACTIVATION
-   |
-   v
-CAPTURE USER COMMAND
+```text
+REALTIME
+    ↓
+Pocket TTS if available
+
+EXPRESSIVE
+    ↓
+Breeze TTS if compatible
+
+LOW_RESOURCE
+    ↓
+lowest-cost local engine
+
+OFFLINE
+    ↓
+local engines only
 ```
 
-Continuous raw microphone audio should not need to be sent to a cloud service merely to detect the wake phrase if a suitable local solution is available.
-
-The final design depends on chosen providers and platforms.
+Routing logic must remain evidence-based.
 
 ---
 
-# 35. Wake-Word Privacy
+# 37. No Silent Cloud Fallback
 
-Wake-word mode must be optional.
+If voice mode is configured:
 
-Users should be able to see whether it is enabled.
+```text
+LOCAL_ONLY
+```
 
-The interface should communicate:
+Mikasa must never silently send:
 
-```text id="oer3or"
-Wake word: On
+```text
+audio
 
-Microphone standby: Active
+transcript
+
+response text
+```
+
+to a remote speech provider.
+
+Any cloud fallback must require explicit configuration.
+
+---
+
+# 38. Hardware Awareness
+
+TTS providers may have very different requirements.
+
+The router should inspect:
+
+```text
+CPU
+
+RAM
+
+GPU
+
+VRAM
+
+OS
+
+available provider runtime
+```
+
+through approved hardware APIs.
+
+No user-specific hardware model should be hard-coded.
+
+---
+
+# 39. Provider Availability
+
+A provider may be:
+
+```text
+NOT_INSTALLED
+
+INSTALLED
+
+LOADING
+
+AVAILABLE
+
+DEGRADED
+
+INCOMPATIBLE
+
+FAILED
+```
+
+Voice UI should represent actual state.
+
+---
+
+# 40. Voice Identity
+
+Mikasa should have a provider-independent voice identity.
+
+Suggested concept:
+
+```text
+VoiceIdentity:
+    identity_id
+    name
+
+    persona_description
+
+    reference_voice
+
+    voice_embedding_refs
+
+    supported_languages
+
+    delivery_defaults
+
+    provider_profiles
+```
+
+Example identity:
+
+```text
+identity_id:
+mikasa_default
+
+presentation:
+young feminine voice
+
+character:
+warm
+confident
+intelligent
+natural
+calm
+
+delivery:
+conversational
+subtle
+not robotic
+not announcer-like
+```
+
+---
+
+# 41. Original Voice Requirement
+
+Mikasa's voice should be based on:
+
+- An original voice.
+- Properly licensed voice material.
+- Authorized voice cloning input.
+
+The architecture should not depend on impersonating a specific real person.
+
+---
+
+# 42. Voice Portability
+
+The same Mikasa identity should be reproducible across providers where possible.
+
+Example:
+
+```text
+Pocket TTS
+    → Mikasa voice embedding A
+
+Breeze TTS
+    → Mikasa voice profile B
+```
+
+The resulting voices need not be acoustically identical.
+
+They should preserve recognizable style and identity.
+
+---
+
+# 43. Speech Director
+
+`SpeechDirector` converts Mikasa's canonical response into a spoken-performance request.
+
+The LLM response should not be sent blindly to TTS.
+
+Conceptually:
+
+```text
+Canonical Response
+      |
+      v
+Speech Director
+      |
+      v
+Spoken Representation
+      |
+      v
+TTS Router
+```
+
+---
+
+# 44. Spoken Representation
+
+Conceptual structure:
+
+```text
+SpeechRequest:
+    request_id
+
+    spoken_text
+
+    delivery:
+        mood
+        energy
+        pace
+        emphasis
+        pause_style
+        urgency
+
+    vocal_events
+
+    voice_identity
+
+    priority
+
+    interruptible
+
+    task_id
+```
+
+The exact schema requires an ADR.
+
+---
+
+# 45. Canonical vs. Spoken Response
+
+The canonical answer may be:
+
+```text
+The test suite completed with 132 passing tests.
+Two integration tests failed because the database
+fixture is missing...
+```
+
+Mikasa may speak:
+
+```text
+"The tests finished. Two integration tests failed.
+I put the details on screen."
+```
+
+The spoken version is presentation.
+
+The canonical result remains unchanged.
+
+---
+
+# 46. Natural Speech
+
+Speech output should avoid sounding like:
+
+```text
+I. HAVE. COMPLETED. THE. TASK.
+```
+
+The system should support:
+
+- Natural phrasing.
+- Prosody.
+- Pauses.
+- Sentence rhythm.
+- Emphasis.
+- Appropriate speed variation.
+
+The TTS provider determines how much control is available.
+
+---
+
+# 47. Emotion and State
+
+Speech delivery may respond to conversational state.
+
+Examples:
+
+```text
+normal explanation
+→ calm / conversational
+
+important warning
+→ focused / slightly urgent
+
+successful task
+→ warm / positive
+
+user interruption
+→ brief / responsive
+
+error
+→ calm / clear
+```
+
+Do not create exaggerated artificial emotion for every response.
+
+---
+
+# 48. State-Aware Speech
+
+Speech may take context from:
+
+```text
+task state
+
+conversation state
+
+response purpose
+
+urgency
+
+approval state
+
+error state
+```
+
+It should not use private hidden reasoning.
+
+---
+
+# 49. Vocal Events
+
+Advanced engines may support subtle events such as:
+
+```text
+small laugh
+
+breath
+
+sigh
+
+hesitation
+```
+
+These should be used sparingly.
+
+They should never make critical information harder to understand.
+
+---
+
+# 50. Speech Segmentation
+
+Long responses should be segmented.
+
+Example:
+
+```text
+Sentence group 1
+→ synthesize
+→ play
+
+Sentence group 2
+→ synthesize
+→ play
+```
+
+This reduces first-audio latency.
+
+---
+
+# 51. Semantic Chunking
+
+Do not split speech arbitrarily by character count.
+
+Prefer boundaries such as:
+
+- Sentence.
+- Clause.
+- Short paragraph.
+- Complete idea.
+
+This improves naturalness.
+
+---
+
+# 52. Response Streaming
+
+Future integration may allow:
+
+```text
+LLM TOKEN STREAM
+      |
+      v
+STABLE TEXT SEGMENTER
+      |
+      v
+SPEECH DIRECTOR
+      |
+      v
+STREAMING TTS
+```
+
+This allows Mikasa to begin speaking before the full LLM response is complete.
+
+---
+
+# 53. Stable Text Barrier
+
+Raw partial model tokens must not immediately reach TTS.
+
+Bad:
+
+```text
+"I thi—"
+```
+
+because later generation may change direction.
+
+The segmenter should wait for stable semantic chunks.
+
+---
+
+# 54. Speculative Speech
+
+Very advanced implementations may speak speculative content early.
+
+This should be avoided initially.
+
+Incorrect spoken information is harder to retract than uncommitted text.
+
+---
+
+# 55. Conversational Acknowledgments
+
+For long-running tasks, Mikasa may respond quickly with:
+
+```text
+"Got it. I'm checking the project now."
+```
+
+Then the actual task proceeds independently.
+
+This reduces perceived latency.
+
+The acknowledgment must reflect real task creation.
+
+---
+
+# 56. Progress Speech Policy
+
+Mikasa should not narrate every internal action.
+
+Useful spoken updates:
+
+```text
+"I found the failing test."
+
+"I need your permission before I modify that folder."
+
+"The task is finished."
+```
+
+Avoid:
+
+```text
+"I'm calling tool number three."
+
+"I'm parsing JSON now."
+
+"I'm making model request six."
+```
+
+---
+
+# 57. Progress Modes
+
+Possible user configuration:
+
+```text
+SILENT
+
+IMPORTANT_ONLY
+
+NORMAL
+
+VERBOSE
+```
+
+Default should likely be:
+
+```text
+IMPORTANT_ONLY
+```
+
+during background work.
+
+---
+
+# 58. Speech Priority
+
+Speech queue priorities may include:
+
+```text
+CRITICAL
+
+APPROVAL
+
+DIRECT_REPLY
+
+TASK_RESULT
+
+IMPORTANT_PROGRESS
+
+LOW_PRIORITY_PROGRESS
+```
+
+Higher-priority messages may replace stale low-priority speech.
+
+---
+
+# 59. User Interruption Priority
+
+Human speech always has priority over ordinary Mikasa speech.
+
+When reliable interruption is available:
+
+```text
+USER SPEECH
+>
+TTS OUTPUT
+```
+
+---
+
+# 60. Voice Sessions
+
+Conceptual structure:
+
+```text
+VoiceSession:
+    voice_session_id
+
+    session_id
+
+    mode
+
+    state
+
+    microphone_device
+    output_device
+
+    stt_provider
+    tts_profile
+
+    voice_identity
+
+    started_at
+    last_activity_at
+
+    muted
+```
+
+Voice session state is separate from agent task state.
+
+---
+
+# 61. Voice Modes
+
+Potential modes:
+
+```text
+PUSH_TO_TALK
+
+TAP_TO_TALK
+
+CONVERSATION
+
+HANDS_FREE
+
+WAKE_WORD
+```
+
+Initial target:
+
+```text
+PUSH_TO_TALK
++
+INTERRUPTIBLE PLAYBACK
+```
+
+---
+
+# 62. Conversation Mode
+
+Later:
+
+```text
+CONVERSATION MODE
+```
+
+keeps a voice session open.
+
+The user can:
+
+- Speak.
+- Wait.
+- Interrupt.
+- Continue.
+
+No repeated microphone button is required.
+
+---
+
+# 63. Wake Word
+
+Wake word should be added only after conversation mode is reliable.
+
+Preferred architecture:
+
+```text
+LOCAL WAKE DETECTOR
+
+↓
+
+VOICE SESSION ACTIVATION
+```
+
+The wake word grants attention.
+
+It does not grant permission for privileged actions.
+
+---
+
+# 64. Always-Listening Privacy
+
+Always-listening mode must clearly indicate:
+
+```text
+MICROPHONE STANDBY ACTIVE
+```
+
+Local wake-word detection should be preferred when practical.
+
+Raw standby audio should not become conversation history or memory.
+
+---
+
+# 65. Speech-to-Text Provider Router
+
+STT should also use provider abstraction.
+
+Possible future providers:
+
+```text
+LOCAL FAST STT
+
+LOCAL HIGH ACCURACY STT
+
+REMOTE OPTIONAL STT
+```
+
+Routing may consider:
+
+- Language.
+- Hardware.
+- Latency.
+- Privacy.
+- Accuracy.
+
+---
+
+# 66. STT Confidence
+
+Low-confidence recognition should affect behavior.
+
+Example:
+
+Recognized:
+
+```text
+"delete project cache"
+```
+
+with poor confidence.
+
+For potentially destructive action:
+
+```text
+REQUEST CONFIRMATION
+```
+
+STT confidence is not identity authentication.
+
+---
+
+# 67. Command Corrections
+
+User:
+
+```text
+"No, I said config, not cache."
+```
+
+This should:
+
+- Correct the conversational turn.
+- Update current task context if relevant.
+- Not create unrelated memory automatically.
+
+---
+
+# 68. Voice Approval
+
+Voice approvals must use the normal Permission Service.
+
+Example:
+
+```text
+MIKASA:
+"I need permission to write outside the current project.
+Allow it once?"
+```
+
+User:
+
+```text
+"Yes, only this folder."
+```
+
+The resulting permission scope must reflect:
+
+```text
+THIS FOLDER
+```
+
+not a broad approval.
+
+---
+
+# 69. Sensitive Voice Approvals
+
+High-impact actions may require stronger confirmation.
+
+Potential behavior:
+
+```text
+voice confirmation
+
++
+
+visible approval card
+```
+
+for certain permissions.
+
+Exact policy belongs to Security ADRs.
+
+---
+
+# 70. Voice Is Not Authentication
+
+Speaker recognition may eventually help personalize interaction.
+
+It must not become the sole security mechanism for:
+
+- Credentials.
+- Destructive actions.
+- Sensitive data.
+- Permission elevation.
+
+---
+
+# 71. Audio Retention
+
+Raw microphone audio should use minimal retention.
+
+Preferred default:
+
+```text
+PROCESS
+
+↓
+
+TRANSCRIBE
+
+↓
+
+DISCARD
+```
+
+unless:
+
+- User explicitly saves it.
+- Debug mode explicitly captures it.
+- A task requires it.
+
+---
+
+# 72. Transcript Retention
+
+Final transcripts may enter conversation history.
+
+They do not automatically become persistent memory.
+
+Conversation history:
+
+```text
+!=
+MEMORY
+```
+
+---
+
+# 73. TTS Cache
+
+The system may cache safe reusable voice assets such as:
+
+```text
+voice embeddings
+
+provider states
+
+model weights
+```
+
+Generated conversational speech should not be permanently cached by default.
+
+---
+
+# 74. Voice Model Loading
+
+Some local models may take time to initialize.
+
+The runtime should support:
+
+```text
+COLD
+
+LOADING
+
+READY
+
+UNLOADING
+```
+
+states.
+
+Frequently used voice models may remain loaded when resources permit.
+
+---
+
+# 75. Resource Management
+
+The Voice Runtime should coordinate memory use with:
+
+- Local LLM.
+- Browser.
+- Coding sandbox.
+- Other local models.
+
+Running everything simultaneously may exceed hardware capacity.
+
+---
+
+# 76. Adaptive Model Loading
+
+Possible policy:
+
+```text
+HIGH RESOURCE SYSTEM
+→ keep STT + TTS loaded
+
+LOW RESOURCE SYSTEM
+→ lazy load / unload
+
+VOICE SESSION START
+→ prewarm required model
+```
+
+This must be based on actual hardware.
+
+---
+
+# 77. Latency Budget
+
+Important latency stages:
+
+```text
+speech detection
+
+endpointing
+
+STT
+
+agent response
+
+speech segmentation
+
+TTS first chunk
+
+audio playback
+```
+
+Each should be measured separately.
+
+Do not only measure total round-trip time.
+
+---
+
+# 78. First-Audio Latency
+
+A key voice metric is:
+
+```text
+time from end of user turn
+to first Mikasa audio
+```
+
+Another useful metric:
+
+```text
+time from generated speech segment
+to first playback sample
+```
+
+No numerical target should be committed until baseline measurements exist.
+
+---
+
+# 79. Interruption Latency
+
+Measure:
+
+```text
+user starts speaking
+↓
+Mikasa audio stops
+```
+
+This is one of the most important perceived-quality metrics.
+
+---
+
+# 80. Naturalness Evaluation
+
+Voice evaluation should consider:
+
+- Naturalness.
+- Intelligibility.
+- Voice consistency.
+- Latency.
+- Prosody.
+- Interruption behavior.
+- Long-form stability.
+
+Naturalness should be evaluated with blind listening where practical.
+
+---
+
+# 81. Voice Identity Evaluation
+
+Test whether listeners perceive the same Mikasa identity across:
+
+- Neutral speech.
+- Fast speech.
+- Serious warnings.
+- Longer explanations.
+- Different TTS providers.
+
+Provider switching should not make Mikasa feel like a completely different assistant when avoidable.
+
+---
+
+# 82. Provider Fallback
+
+If preferred expressive TTS is unavailable:
+
+```text
+EXPRESSIVE
+    ↓
+REALTIME
+```
+
+may be allowed.
+
+Fallback should never silently violate:
+
+```text
+LOCAL_ONLY
+```
+
+or other privacy settings.
+
+---
+
+# 83. Graceful Degradation
+
+Possible degradation:
+
+```text
+FULL DUPLEX
+    ↓
+INTERRUPTIBLE HALF DUPLEX
+    ↓
+PUSH TO TALK
+    ↓
+TEXT ONLY
+```
+
+Mikasa should remain usable.
+
+---
+
+# 84. Failure Behavior
+
+Possible errors:
+
+```text
+MICROPHONE_UNAVAILABLE
+
+AUDIO_DEVICE_LOST
+
+STT_UNAVAILABLE
+
+STT_TIMEOUT
+
+TTS_UNAVAILABLE
+
+TTS_STREAM_FAILED
+
+AEC_FAILED
+
+VOICE_MODEL_INCOMPATIBLE
+
+RESOURCE_EXHAUSTED
+```
+
+Voice failure should not crash the core assistant.
+
+---
+
+# 85. TTS Failure
+
+If TTS fails:
+
+```text
+canonical text response remains available
+```
+
+The task result must not be lost.
+
+---
+
+# 86. STT Failure
+
+If STT fails:
+
+Do not invent a user request.
+
+Show:
+
+```text
+I couldn't reliably transcribe that.
 ```
 
 or equivalent.
 
-No hidden always-listening mode should be introduced.
-
 ---
 
-# 36. Wake-Word False Activations
+# 87. Device Changes
 
-Wake-word detection can produce false positives.
+Future desktop/mobile support should handle:
 
-After activation, Mikasa should only create a task when meaningful speech is captured.
+```text
+headphones connected
 
-Random background audio should not create autonomous tasks.
+Bluetooth device changed
 
----
+microphone disconnected
 
-# 37. Wake-Word Timeout
-
-After wake activation, the system should return to standby if no meaningful command arrives within a reasonable configured window.
-
-Exact timing should be determined during UX testing.
-
----
-
-# 38. Live Conversation
-
-Future live conversation should support fluid turns.
-
-Conceptually:
-
-```text id="zi31bm"
-USER SPEAKS
-    |
-    v
-STREAMING STT
-    |
-    v
-MIKASA PROCESSES
-    |
-    v
-STREAMING RESPONSE
-    |
-    v
-STREAMING TTS
-    |
-    v
-USER INTERRUPTS
+default output changed
 ```
 
-This requires significantly more complexity than push-to-talk.
-
-It should be implemented only after basic voice interaction is reliable.
+without restarting Mikasa when practical.
 
 ---
 
-# 39. Full Duplex
+# 88. Headphones
 
-Full-duplex audio allows Mikasa and the user to speak with minimal turn barriers.
+Headphones simplify:
 
-Potential problems:
-
-- Mikasa hearing her own voice.
-- Echo.
-- Cross-talk.
-- Partial transcription.
-- Accidental interruption.
-- High latency.
-- Increased compute.
-
-Echo cancellation and audio routing may be required.
-
-Full duplex is a later capability.
-
----
-
-# 40. Half Duplex
-
-Half-duplex is simpler:
-
-```text id="vp7hxv"
-USER SPEAKS
-    |
-    v
-MIKASA LISTENS
-    |
-    v
-MIKASA SPEAKS
-    |
-    v
-USER SPEAKS
-```
-
-The first voice implementation should prefer this model.
-
----
-
-# 41. Streaming STT
-
-Future streaming transcription may provide partial text while the user speaks.
-
-The system must distinguish:
-
-```text id="z09x4f"
-PARTIAL TRANSCRIPT
-```
-
-from:
-
-```text id="q0v2um"
-FINAL TRANSCRIPT
-```
-
-Partial transcripts must not trigger high-impact actions.
-
-The Application Gateway should normally receive finalized user input.
-
----
-
-# 42. Streaming TTS
-
-Streaming TTS may reduce perceived latency.
-
-The system should start speaking only when enough response content is stable.
-
-Tool-call arguments, internal structured data, or incomplete code must not accidentally be spoken as final results.
-
----
-
-# 43. Latency
-
-Voice interaction is sensitive to delay.
-
-Potential latency stages:
-
-```text id="2y9vyj"
-AUDIO CAPTURE
-
-STT
-
-MODEL RESPONSE
-
-TOOL EXECUTION
-
-TTS
-
-PLAYBACK
-```
-
-Mikasa should optimize the user experience without hiding actual task state.
-
-For long-running work, she may say:
-
-```text id="2u5t8g"
-"I've started checking the project. I'll show the task progress on screen."
-```
-
-rather than holding the voice interaction open indefinitely.
-
----
-
-# 44. Voice Progress
-
-Voice progress should be concise.
-
-Useful:
-
-```text id="xoq1dz"
-"I'm running the tests now."
-```
-
-```text id="1cxc8v"
-"I found the failure and I'm checking the relevant module."
-```
-
-Avoid narrating every tool call.
-
----
-
-# 45. Background Tasks and Voice
-
-Voice should be able to start long-running tasks.
-
-Once the task is created, it belongs to the normal task system.
-
-The Voice Controller does not need to remain active for the task to continue.
-
-This is especially important for future persistent execution.
-
----
-
-# 46. Voice Notifications
-
-Future desktop or mobile clients may speak selected notifications.
-
-Examples:
-
-```text id="u16jlg"
-"Your task is complete."
-
-"Mikasa needs your approval."
-
-"The project build failed."
-```
-
-Spoken notifications should be configurable.
-
-They must not reveal private information unexpectedly in shared environments.
-
----
-
-# 47. Privacy Mode
-
-A future privacy setting may disable spoken content or sensitive spoken details.
-
-Possible options:
-
-```text id="qncnyx"
-Voice responses:
-On / Off
-
-Speak notifications:
-On / Off
-
-Speak sensitive details:
-Never / Ask / Allow
-```
-
-The exact design requires UX testing.
-
----
-
-# 48. Headphone Awareness
-
-Future platform integrations may use output-device information.
-
-For example, detailed spoken information may be more acceptable through headphones than a loudspeaker.
-
-This is optional and platform-dependent.
-
-No special behavior is required for MVP.
-
----
-
-# 49. Speech History
-
-The user may want a record of voice interactions.
-
-The system should store the resulting transcript according to normal conversation-history rules.
-
-Raw audio should not automatically be retained permanently.
-
----
-
-# 50. Raw Audio Retention
-
-Raw voice recordings should use a deliberate retention policy.
-
-Possible modes:
-
-```text id="5du5er"
-DO NOT RETAIN
-
-TEMPORARY UNTIL TRANSCRIPTION
-
-USER-REQUESTED RETENTION
-```
-
-The default should minimize unnecessary audio storage.
-
-Exact policy must be finalized before production voice deployment.
-
----
-
-# 51. Transcript Retention
-
-Final transcripts may be stored as normal conversation messages.
-
-This must remain distinct from persistent memory.
-
-A spoken sentence does not automatically become long-term user memory.
-
-Memory creation still follows:
-
-`docs/05_MEMORY_ARCHITECTURE.md`
-
----
-
-# 52. Speech Errors
-
-Possible voice errors include:
-
-```text id="unij5w"
-MICROPHONE_UNAVAILABLE
-
-MICROPHONE_PERMISSION_DENIED
-
-NO_SPEECH_DETECTED
-
-TRANSCRIPTION_FAILED
-
-TTS_FAILED
-
-AUDIO_DEVICE_ERROR
-
-PROVIDER_UNAVAILABLE
-
-TIMEOUT
-```
-
-Errors should be normalized.
-
-The user should receive understandable feedback.
-
----
-
-# 53. No-Speech Detection
-
-If the user activates voice input but says nothing, Mikasa should not create an empty task.
-
-The interface may simply return to idle.
-
----
-
-# 54. Low-Confidence Transcript
-
-When transcription quality is poor, the system may:
-
-- Show the transcript for confirmation.
-- Ask the user to repeat.
-- Proceed if the task is low impact and clear enough.
-
-High-impact actions should use stronger confirmation.
-
----
-
-# 55. Voice Provider Abstraction
-
-Speech providers must be replaceable.
-
-Possible abstractions:
-
-```text id="3f6xw0"
-SpeechToTextProvider
-
-TextToSpeechProvider
-
-WakeWordProvider
-
-VoiceActivityDetector
-```
-
-These may come from different vendors or local libraries.
-
-The Voice Controller should remain provider-independent.
-
----
-
-# 56. Local Voice Providers
-
-Mikasa should eventually support local STT and TTS where practical.
-
-Benefits may include:
-
+- Echo cancellation.
+- Full duplex.
 - Privacy.
-- Offline operation.
-- Reduced provider cost.
-- Lower dependency on network connectivity.
 
-Trade-offs may include:
-
-- Hardware load.
-- Installation complexity.
-- Model size.
-- Accuracy.
-- Latency.
-
-Local provider selection must be based on actual evaluation.
+But they must not be required.
 
 ---
 
-# 57. Cloud Voice Providers
-
-Cloud providers may offer:
-
-- Better speech recognition.
-- More natural voices.
-- Language coverage.
-- Streaming features.
-
-They also introduce:
-
-- Network dependency.
-- Credential requirements.
-- Data-handling concerns.
-- Usage cost.
-
-The same provider abstraction should support both local and cloud services.
-
----
-
-# 58. Voice and Model Router
-
-The Voice System should not directly select the language model.
-
-After transcription:
-
-```text id="ydo1py"
-VOICE
-   |
-   v
-TEXT
-   |
-   v
-APPLICATION GATEWAY
-   |
-   v
-AGENT RUNTIME
-   |
-   v
-MODEL ROUTER
-```
-
-Voice and text requests therefore share the same model-routing architecture.
-
----
-
-# 59. Voice and Memory
-
-Voice-originated requests should use the same Memory Service as text.
-
-The system must not maintain:
-
-```text id="ghpq51"
-voice memory
-```
-
-and:
-
-```text id="w41dbx"
-text memory
-```
-
-as separate user histories unless there is an explicit product requirement.
-
----
-
-# 60. Voice and Permissions
-
-Voice commands must use the same permission system.
-
-Saying:
-
-```text id="5w8y6q"
-"Delete that folder."
-```
-
-does not bypass file-delete permissions.
-
-Saying:
-
-```text id="9gjmda"
-"Just do whatever you need."
-```
-
-does not grant unrestricted machine control unless an explicit trusted authorization flow defines that scope.
-
----
-
-# 61. Voice and Specialists
-
-The user should not need to address specialists by voice during ordinary use.
-
-Example:
-
-```text id="e99nd6"
-"Mikasa, research this and fix the project."
-```
-
-Mikasa may internally delegate.
-
-The spoken interaction remains with Mikasa.
-
----
-
-# 62. Voice Personality
-
-Voice presentation may eventually influence:
-
-- Warmth.
-- Speaking pace.
-- Conciseness.
-- Formality.
-- Pauses.
-
-These are presentation characteristics.
-
-They must remain separate from permission and runtime architecture.
-
----
-
-# 63. Spoken Content Style
-
-Spoken responses should generally be shorter than written responses.
-
-Voice should prioritize:
-
-- Outcome.
-- Important status.
-- Required decisions.
-- Critical warnings.
-
-Detailed code, tables, and logs should remain primarily visual.
-
----
-
-# 64. Code by Voice
-
-Voice may be useful for coding commands:
-
-```text id="bm1bj1"
-"Mikasa, run the tests."
-
-"Open the task result."
-
-"Cancel the current build."
-```
-
-Long code dictation is possible but is not a priority feature.
-
-The interface may show the transcribed command before execution.
-
----
-
-# 65. Voice Corrections
-
-The user should be able to correct misunderstood speech.
-
-Example:
-
-```text id="qyrc5d"
-User:
-"No, I said the auth file, not the app file."
-```
-
-Mikasa should treat the correction as new user input and update the task context appropriately.
-
----
-
-# 66. Device Routing
-
-Future versions may support selecting:
-
-- Input microphone.
-- Output speaker.
-- Bluetooth headset.
-- Default system device.
-
-Device selection should remain an interface concern.
-
-The core agent runtime should not care which microphone is being used.
-
----
-
-# 67. Mobile Voice
-
-A mobile client may eventually provide a strong voice-first interface.
-
-Potential capabilities:
-
-- Push-to-talk.
-- Task creation.
-- Notifications.
-- Quick approvals.
-- Spoken summaries.
-
-Mobile-specific integrations must still use the same backend contracts.
-
----
-
-# 68. Desktop Voice
+# 89. Desktop Integration
 
 Desktop voice may support:
 
-- Keyboard shortcut activation.
+```text
+global push-to-talk hotkey
+
+conversation overlay
+
+microphone state
+
+current transcript
+
+interrupt button
+
+mute
+```
+
+The interface remains separate from the Voice Runtime.
+
+---
+
+# 90. Mobile Integration
+
+Mobile may eventually support:
+
 - Push-to-talk.
-- Wake word.
-- Desktop overlay.
-- Spoken task updates.
+- Hands-free conversation.
+- Bluetooth headset integration.
+- Lock-screen task status.
+- Voice notifications.
 
-The desktop app should not require voice to function.
-
-Voice must remain optional.
-
----
-
-# 69. Voice Overlay
-
-A lightweight future overlay may show:
-
-```text id="r7kw5m"
-M I K A S A
-
-● Listening...
-
-"Run the tests for Mikasa"
-```
-
-or:
-
-```text id="6g300f"
-M I K A S A
-
-Speaking...
-```
-
-The overlay should be dismissible.
+Mobile OS restrictions must be respected.
 
 ---
 
-# 70. Visual Feedback
+# 91. Spoken Notifications
 
-Even in voice-first use, visual feedback is useful.
-
-The UI may display:
-
-- Live microphone state.
-- Transcript.
-- Task status.
-- Approval prompts.
-- Spoken-response text.
-
-Voice and visual feedback should stay synchronized.
-
----
-
-# 71. Audio Feedback
-
-Small audio cues may indicate:
-
-- Activation.
-- Listening stopped.
-- Error.
-- Approval required.
-
-Cues should be subtle and configurable.
-
-Avoid excessive UI sounds.
-
----
-
-# 72. Voice Security Events
-
-Potential operational events:
-
-```text id="t9qgo7"
-voice.listening_started
-
-voice.listening_stopped
-
-voice.transcription_started
-
-voice.transcription_completed
-
-voice.transcription_failed
-
-voice.speech_started
-
-voice.speech_interrupted
-
-voice.speech_completed
-
-voice.approval_received
-```
-
-These should not contain unnecessary raw audio.
-
----
-
-# 73. Voice Observability
-
-Developer mode may show:
-
-```text id="ossgvj"
-STT provider
-
-STT latency
-
-Detected language
-
-Transcript
-
-TTS provider
-
-TTS latency
-
-Voice state
-```
-
-Sensitive spoken content should follow the same logging privacy rules as text.
-
----
-
-# 74. Voice Resource Budgets
-
-Future voice sessions may use:
-
-- Audio processing.
-- STT model inference.
-- TTS generation.
-- Network bandwidth.
-
-The system may eventually support limits on:
-
-- Recording duration.
-- Transcription duration.
-- Audio output length.
-- Provider usage.
-
-MVP only needs reasonable practical limits and timeouts.
-
----
-
-# 75. Voice Timeouts
-
-Voice operations should support timeouts.
+Mikasa may speak important task events.
 
 Examples:
 
-```text id="0uk7q4"
-maximum_recording_length
+```text
+"The build finished."
 
-stt_timeout
+"I need your approval."
 
-tts_timeout
+"The research task is blocked."
 ```
 
-Failure to transcribe must not leave the system permanently stuck in processing state.
+Notifications must be configurable.
 
 ---
 
-# 76. Offline Voice Mode
+# 92. Quiet Mode
 
-Future local voice support may allow:
+Voice configuration should eventually allow:
 
-```text id="5uxd5q"
-LOCAL STT
+```text
+SILENT
 
-LOCAL MIKASA MODEL
+HEADPHONES_ONLY
 
-LOCAL TTS
+NORMAL
+
+DO_NOT_DISTURB
 ```
 
-This could provide fully local conversation for supported tasks.
-
-Offline capability depends on model availability and hardware.
-
-The architecture should support it without requiring it for MVP.
+A task completing at an inconvenient time should not unexpectedly speak aloud.
 
 ---
 
-# 77. Voice Research Requirements
+# 93. Observability
 
-Before implementation, research appropriate voice technologies for:
+Voice events should include:
 
-- Speech recognition.
-- Local STT.
-- Cloud STT.
-- Text-to-speech.
-- Local TTS.
-- Streaming audio.
-- Wake-word detection.
-- Voice activity detection.
-- Cross-platform audio capture.
+```text
+voice.session_started
 
-Selection should consider:
+voice.user_speech_started
 
-- Latency.
-- Accuracy.
-- Language support.
-- Resource requirements.
-- Privacy.
-- Licensing.
-- Platform compatibility.
-- Maintenance.
+voice.user_speech_ended
 
-No provider should be selected solely because it is popular.
+voice.partial_transcript
 
----
+voice.final_transcript
 
-# 78. MVP Voice Scope
+voice.response_started
 
-The first voice milestone should support:
+voice.tts_started
 
-| Capability | First voice milestone |
-|---|---|
-| Microphone input | Required |
-| Push-to-talk | Required |
-| Speech-to-text | Required |
-| Transcript display | Required |
-| Submit transcript to Mikasa | Required |
-| Text-to-speech | Required |
-| Stop speech | Required |
-| Voice errors | Required |
-| Voice task creation | Required |
-| Voice task cancellation | Required |
-| Wake word | Deferred |
-| Streaming STT | Deferred |
-| Streaming TTS | Deferred |
-| Full duplex | Deferred |
-| Continuous conversation | Deferred |
-| Multi-device voice | Deferred |
-| Speaker identification | Deferred |
-| Automatic language switching | Deferred |
+voice.tts_first_chunk
 
----
+voice.playback_started
 
-# 79. MVP Acceptance Scenario
+voice.barge_in_detected
 
-The first voice implementation must support a real interaction.
+voice.playback_interrupted
 
-## Step 1
-
-User activates push-to-talk.
-
-UI shows:
-
-```text id="lrzd26"
-Listening...
+voice.session_ended
 ```
 
-## Step 2
+Sensitive raw audio must not appear in normal logs.
+
+---
+
+# 94. Voice Traces
+
+One voice turn may trace:
+
+```text
+turn_24
+
+├─ VAD start
+├─ STT partial
+├─ STT final
+├─ UserRequest created
+├─ Agent response
+├─ SpeechDirector
+├─ TTS stream
+├─ Playback
+└─ completion
+```
+
+This is extremely useful for latency tuning.
+
+---
+
+# 95. Voice Metrics
+
+Potential metrics:
+
+```text
+speech_to_final_transcript_latency
+
+turn_endpoint_latency
+
+response_first_token_latency
+
+tts_first_chunk_latency
+
+first_audio_latency
+
+barge_in_stop_latency
+
+stt_error_rate
+
+tts_error_rate
+
+false_barge_in_rate
+```
+
+No invented benchmark numbers.
+
+---
+
+# 96. Testing — Audio Front-End
+
+Verify:
+
+```text
+microphone starts/stops
+
+correct device used
+
+audio format normalized
+
+noise input does not create task
+
+device loss handled
+```
+
+---
+
+# 97. Testing — Streaming STT
+
+Verify:
+
+```text
+partial transcripts arrive
+
+final transcript arrives once
+
+duplicate final transcript does not create duplicate task
+
+cancel stops transcription
+
+low-confidence sensitive command is handled safely
+```
+
+---
+
+# 98. Testing — TTS Streaming
+
+Verify:
+
+```text
+first audio chunk plays before complete synthesis
+
+chunks play in order
+
+cancel stops generation
+
+flush removes stale queued speech
+```
+
+---
+
+# 99. Testing — Barge-In
+
+Critical scenario:
+
+```text
+MIKASA SPEAKING
+
+↓
+
+USER STARTS TALKING
+
+↓
+
+MIKASA AUDIO DUCKS
+
+↓
+
+HUMAN SPEECH CONFIRMED
+
+↓
+
+TTS CANCELLED
+
+↓
+
+PLAYBACK STOPS
+
+↓
+
+USER TRANSCRIPT CONTINUES
+```
+
+Task continues unless separately cancelled.
+
+---
+
+# 100. Testing — Echo Prevention
+
+While Mikasa speaks through speakers:
+
+```text
+her own voice must not create a new user turn
+```
+
+This requires a dedicated integration test.
+
+---
+
+# 101. Testing — Task Cancellation
+
+Scenario:
 
 User says:
 
-```text id="33bhq2"
-"Mikasa, run the tests for this project."
-```
-
-## Step 3
-
-Speech is transcribed.
-
-The transcript appears on screen.
-
-## Step 4
-
-The transcript is submitted through the normal Application Gateway.
-
-## Step 5
-
-Mikasa creates or continues the appropriate task.
-
-## Step 6
-
-The task executes through the normal Agent Runtime.
-
-## Step 7
-
-Mikasa returns a result.
-
-## Step 8
-
-A concise version of the result is spoken.
-
-Example:
-
-```text id="99802c"
-"The tests finished. One test failed. I've shown the details on screen."
-```
-
-This must use real STT, backend task state, and TTS.
-
-Hard-coded transcripts or prerecorded responses do not satisfy the acceptance scenario.
-
----
-
-# 80. Cancellation Acceptance Scenario
-
-While Mikasa is speaking:
-
-User says or activates:
-
-```text id="9grtsk"
+```text
 "Stop talking."
 ```
 
 Expected:
 
-- Audio output stops.
-- The task remains unchanged.
+```text
+speech stops
+
+task remains RUNNING
+```
 
 Then:
 
-```text id="gqcc8x"
-"Cancel the current task."
+```text
+"Cancel the task."
 ```
 
 Expected:
 
-- Real Task Manager cancellation is requested.
-- Mikasa reports the actual cancellation result.
-
-The two commands must not be treated as equivalent.
+```text
+TaskManager cancellation requested
+```
 
 ---
 
-# 81. Approval Acceptance Scenario
+# 102. Testing — Provider Fallback
 
-A task reaches an approval-gated action.
-
-Mikasa says:
-
-```text id="xxfglw"
-"I need permission to modify this file. Allow this once?"
-```
-
-The user responds:
-
-```text id="jkn7ve"
-"Yes."
-```
+Preferred provider unavailable.
 
 Expected:
 
-- The response is associated with the active approval.
-- Only the requested scope is granted.
-- The task continues.
-
-A later unrelated action must not reuse this approval automatically.
-
----
-
-# 82. Testing Requirements
-
-## VOICE-TEST-001 — Microphone Permission
-
-Verify voice input reports an understandable failure when microphone permission is denied.
-
-## VOICE-TEST-002 — Audio Capture
-
-Verify push-to-talk captures actual microphone audio.
-
-## VOICE-TEST-003 — Transcription
-
-Verify captured speech produces a transcript through the configured STT provider.
-
-## VOICE-TEST-004 — Transcript Submission
-
-Verify transcript requests use the normal Application Gateway.
-
-## VOICE-TEST-005 — Task Creation
-
-Verify a spoken task request creates a real backend task.
-
-## VOICE-TEST-006 — TTS
-
-Verify actual Mikasa responses can be synthesized and played.
-
-## VOICE-TEST-007 — Stop Speech
-
-Verify output playback can be interrupted.
-
-## VOICE-TEST-008 — Task Cancellation
-
-Verify spoken task cancellation affects the actual Task Manager state.
-
-## VOICE-TEST-009 — Approval
-
-Verify spoken approval applies only to the active approval request.
-
-## VOICE-TEST-010 — STT Failure
-
-Verify transcription failure does not create a fabricated transcript.
-
-## VOICE-TEST-011 — TTS Failure
-
-Verify task completion remains available as text if speech synthesis fails.
-
-## VOICE-TEST-012 — Transcript Error Safety
-
-Verify uncertain speech does not bypass high-impact action confirmation.
-
-## VOICE-TEST-013 — Shared Core
-
-Verify equivalent voice and text requests use the same runtime, memory, task, and permission systems.
+- Router evaluates permitted fallback.
+- Privacy policy respected.
+- Voice identity preserved as much as possible.
+- UI reflects degraded provider.
 
 ---
 
-# 83. Development Sequence
+# 103. Testing — Local-Only
 
-**VOICE-0 — Research**
+Set:
 
-Evaluate STT, TTS, audio, and wake-word options.
+```text
+LOCAL_ONLY = true
+```
 
-**VOICE-1 — Audio Input**
+Disable local providers.
 
-Implement microphone capture and push-to-talk.
+Expected:
 
-**VOICE-2 — STT Contract**
+```text
+VOICE UNAVAILABLE / DEGRADED
+```
 
-Define the provider abstraction and normalized transcription result.
-
-**VOICE-3 — STT Integration**
-
-Integrate one functioning speech-to-text provider.
-
-**VOICE-4 — Gateway Integration**
-
-Submit transcripts as normal user requests.
-
-**VOICE-5 — TTS Contract**
-
-Define TTS provider abstraction.
-
-**VOICE-6 — TTS Integration**
-
-Speak concise Mikasa responses.
-
-**VOICE-7 — Interruption**
-
-Add speech cancellation.
-
-**VOICE-8 — Task Controls**
-
-Support voice cancellation and approval.
-
-**VOICE-9 — Evaluation**
-
-Run end-to-end voice scenarios.
-
-Future phases may add wake word, streaming, full duplex, offline voice, and advanced multimodal interaction.
+Never remote transmission.
 
 ---
 
-# 84. Architecture Decisions Required
+# 104. Testing — Long Speech
 
-The following decisions must be resolved before their implementation:
+Test:
 
-```text id="8ungkd"
+- Long paragraph.
+- Several minutes of output.
+- Memory stability.
+- Audio continuity.
+- Cancellation halfway through.
+
+The system must not require complete audio generation in memory first.
+
+---
+
+# 105. Testing — Rapid Interruption
+
+Test repeated interaction:
+
+```text
+Mikasa speaks
+user interrupts
+Mikasa responds
+user interrupts again
+```
+
+No deadlock.
+
+No overlapping audio streams.
+
+No duplicate transcripts.
+
+---
+
+# 106. Testing — Emotional Delivery
+
+For providers supporting expressive control:
+
+Verify that changes in:
+
+```text
+calm
+
+urgent
+
+positive
+
+serious
+```
+
+produce meaningful but consistent differences.
+
+This test may require human evaluation.
+
+---
+
+# 107. Initial Implementation Milestone
+
+The first real Voice Runtime milestone should contain:
+
+```text
+AudioFrontEnd
+
+Push-to-talk
+
+one local STT provider
+
+TurnManager
+
+SpeechDirector basic implementation
+
+LocalTTSRouter
+
+Pocket TTS candidate adapter or selected equivalent
+
+streaming playback
+
+barge-in
+
+stop-speaking semantics
+
+same Application Gateway
+
+voice observability
+```
+
+---
+
+# 108. Initial Milestone Exclusions
+
+Do not require:
+
+```text
+Breeze TTS integration
+
+wake word
+
+full hands-free mode
+
+speaker authentication
+
+3D avatar
+
+advanced emotional events
+
+mobile voice
+
+multiple simultaneous TTS models
+```
+
+The architecture must support them later.
+
+---
+
+# 109. Second Voice Milestone
+
+Possible additions:
+
+```text
+conversation mode
+
+AEC
+
+continuous microphone
+
+improved endpointing
+
+multiple TTS providers
+
+VoiceIdentity
+
+expressive SpeechDirector
+
+hardware-aware routing
+```
+
+---
+
+# 110. Third Voice Milestone
+
+Possible additions:
+
+```text
+full duplex
+
+wake word
+
+local wake detector
+
+advanced emotion
+
+mobile integration
+
+spoken task notifications
+
+adaptive voice behavior
+```
+
+---
+
+# 111. Candidate Voice Research Tasks
+
+Before implementation, evaluate:
+
+```text
+Pocket TTS
+- actual latency
+- CPU usage
+- voice quality
+- cloning quality
+- streaming cancellation
+
+Breeze TTS 2
+- expressive quality
+- latency
+- VRAM
+- voice consistency
+- streaming
+- license implications
+
+Whisper-Chan
+- actual architecture
+- reusable components
+- provider suitability
+```
+
+Testing must occur on real supported hardware.
+
+---
+
+# 112. STT Research Tasks
+
+Research should compare local STT options for:
+
+```text
+streaming quality
+
+partial transcript quality
+
+endpointing
+
+CPU/GPU requirements
+
+language support
+
+latency
+
+cancellation
+
+Windows support
+```
+
+No STT provider is selected by this document.
+
+---
+
+# 113. Audio Library Research
+
+Evaluate libraries for:
+
+```text
+cross-platform microphone capture
+
+low-latency playback
+
+AEC integration
+
+device switching
+
+buffer control
+
+Windows/macOS/Linux support
+```
+
+The chosen layer must support interruption.
+
+---
+
+# 114. Architecture Decisions Required
+
+```text
 VOICE-ADR-001
-Cross-platform audio library.
+Audio I/O framework.
 
 VOICE-ADR-002
-Initial STT provider.
+Initial local STT provider.
 
 VOICE-ADR-003
-Initial TTS provider.
+Initial real-time TTS provider.
 
 VOICE-ADR-004
-Audio format and sample-rate strategy.
+Expressive TTS provider.
 
 VOICE-ADR-005
-Transcript retention policy.
+Internal audio format.
 
 VOICE-ADR-006
-Raw audio retention policy.
+VAD implementation.
 
 VOICE-ADR-007
-Spoken-response summarization strategy.
+AEC implementation.
 
 VOICE-ADR-008
-Voice approval UX.
+TurnManager state machine.
 
 VOICE-ADR-009
-Future wake-word technology.
+Barge-in thresholds and semantics.
 
 VOICE-ADR-010
-Future VAD architecture.
+SpeechRequest schema.
 
 VOICE-ADR-011
-Future streaming architecture.
+VoiceIdentity representation.
 
 VOICE-ADR-012
-Future local/offline voice stack.
-```
+TTS provider capability schema.
 
-These are planning identifiers.
+VOICE-ADR-013
+Hardware-aware routing.
+
+VOICE-ADR-014
+Raw audio retention.
+
+VOICE-ADR-015
+Streaming STT integration.
+
+VOICE-ADR-016
+Streaming LLM-to-TTS segmentation.
+
+VOICE-ADR-017
+Local-only voice policy.
+
+VOICE-ADR-018
+Future wake-word system.
+```
 
 Approved decisions belong in:
 
@@ -1939,78 +2775,217 @@ Approved decisions belong in:
 
 ---
 
-# 85. Definition of Done
+# 115. Acceptance Scenario — Natural Conversation
 
-The first Voice System milestone is complete when:
+User enables voice.
 
-- Microphone input works through an approved interface.
-- Push-to-talk works reliably.
-- Real audio can be transcribed.
-- The recognized transcript is visible.
-- Voice requests use the same Application Gateway as text requests.
-- Spoken requests can create and control real tasks.
-- Mikasa responses can be synthesized through an actual TTS provider.
-- Speech output can be stopped.
-- Voice task cancellation affects the real Task Manager.
-- Voice approvals use the normal Permission Service.
-- Voice failures fall back to understandable text UI.
-- Raw credentials are never exposed to speech providers unnecessarily.
-- Voice interaction does not create a separate memory or task architecture.
-- The acceptance scenarios succeed.
-- Relevant automated tests pass.
+```text
+USER:
+"Mikasa, check the project tests."
+```
+
+Expected:
+
+1. Speech is detected.
+2. Partial transcript appears.
+3. Final transcript appears.
+4. One canonical request is created.
+5. Real task begins.
+6. Mikasa starts speaking a short acknowledgment.
+7. Speech is streamed.
+8. Task continues.
+
+Then while Mikasa speaks:
+
+```text
+USER:
+"Actually, check the config first."
+```
+
+Expected:
+
+1. Human speech detected.
+2. Mikasa's volume ducks.
+3. Barge-in is confirmed.
+4. Current TTS stream is cancelled.
+5. Queued speech is flushed.
+6. User speech continues transcribing.
+7. New turn reaches the same agent/task context.
+8. Mikasa adapts task plan if appropriate.
+9. Task is not automatically cancelled.
+
+This is the primary voice acceptance scenario.
 
 ---
 
-# 86. Final Voice Principle
+# 116. Acceptance Scenario — Human-Like Delivery
 
-Voice should make Mikasa easier to access, not architecturally different.
+Mikasa produces:
 
-The system must preserve these distinctions:
+```text
+"I found the issue. The config points to the old path."
+```
 
-```text id="ih89iv"
-SPEECH
+Expected:
+
+- Consistent Mikasa voice identity.
+- Natural pacing.
+- Correct emphasis.
+- No robotic long pause before playback.
+- Audio begins before entire response is synthesized.
+
+---
+
+# 117. Acceptance Scenario — Local Privacy
+
+Configuration:
+
+```text
+Voice Mode:
+LOCAL_ONLY
+```
+
+Expected:
+
+- Audio remains local.
+- STT remains local.
+- TTS remains local.
+- No automatic cloud fallback.
+- Missing local provider produces honest degraded state.
+
+---
+
+# 118. Acceptance Scenario — Provider Switching
+
+Realtime provider:
+
+```text
+Pocket TTS
+```
+
+becomes unavailable.
+
+Expressive compatible provider exists locally.
+
+Expected:
+
+- LocalTTSRouter selects permitted provider.
+- VoiceSession remains functional.
+- Provider change is logged.
+- Core task remains unaffected.
+
+---
+
+# 119. Definition of Done — Voice Runtime V1
+
+Voice Runtime V1 is complete when:
+
+- Real microphone input works.
+- Audio is normalized.
+- Local streaming STT works.
+- Partial and final transcripts are distinct.
+- Only final turns create canonical requests.
+- Voice requests use the same Application Gateway as text.
+- TurnManager coordinates interaction state.
+- Local TTS routing exists.
+- At least one real local TTS backend works.
+- Audio plays progressively.
+- First audio begins before complete synthesis finishes.
+- Speech can be interrupted.
+- Barge-in does not cancel the task.
+- Task cancellation is separately supported.
+- Provider failures degrade gracefully.
+- Voice events are observable.
+- Raw secrets/audio are not leaked to logs.
+- Local-only policy is enforceable.
+- End-to-end acceptance tests pass.
+
+---
+
+# 120. Final Voice Architecture Principle
+
+Mikasa's voice should feel like a real conversational interface, not a sound effect added to a chatbot.
+
+The system must preserve:
+
+```text
+HEARING
     !=
-AUTHORITY
+UNDERSTANDING
 
-TRANSCRIPTION
+PARTIAL TRANSCRIPT
     !=
-PERFECT INTENT
+FINAL USER REQUEST
+
+SPEAKING
+    !=
+TASK EXECUTION
 
 STOP SPEAKING
     !=
 CANCEL TASK
 
-VOICE INTERFACE
+VOICE STYLE
     !=
-SEPARATE ASSISTANT
+CORE REASONING
 
-WAKE WORD
+VOICE PROVIDER
     !=
-PERMISSION TO ACT
+MIKASA'S IDENTITY
+
+LOCAL-FIRST
+    !=
+ONE HARD-CODED MODEL
+
+FULL DUPLEX
+    !=
+UNCONTROLLED ALWAYS-LISTENING
 ```
 
-The core flow remains:
+The target loop is:
 
-```text id="i9nb7b"
-LISTEN
-   |
-   v
-TRANSCRIBE
-   |
-   v
-UNDERSTAND
-   |
-   v
-ACT THROUGH MIKASA CORE
-   |
-   v
-VERIFY
-   |
-   v
-RESPOND
-   |
-   v
-SPEAK WHEN USEFUL
+```text
+LISTEN CONTINUOUSLY
+
+↓
+
+DETECT HUMAN SPEECH
+
+↓
+
+TRANSCRIBE STREAMING
+
+↓
+
+UNDERSTAND THE TURN
+
+↓
+
+ACT THROUGH THE SAME MIKASA CORE
+
+↓
+
+PREPARE NATURAL SPOKEN OUTPUT
+
+↓
+
+STREAM LOCAL SPEECH
+
+↓
+
+KEEP LISTENING
+
+↓
+
+ALLOW INTERRUPTION
+
+↓
+
+ADAPT
+
+↓
+
+CONTINUE
 ```
 
-**One Mikasa. Multiple ways to communicate with her.**
+**Mikasa should not merely have a voice. She should have a real-time conversational voice runtime.**
